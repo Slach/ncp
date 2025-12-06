@@ -6,9 +6,55 @@
  */
 
 import { existsSync } from 'fs';
+import { execSync } from 'child_process';
+import { dirname, join } from 'path';
 import { userInfo } from 'os';
 import { getBundledRuntimePath } from './client-registry.js';
 import { logger } from './logger.js';
+
+// Cache for resolved Windows commands to avoid repeated 'where' calls
+const windowsCommandCache = new Map<string, string>();
+
+/**
+ * Resolve a command to its full path on Windows using 'where' command.
+ * This handles all installation methods (Scoop, Chocolatey, nvm-windows, etc.)
+ */
+function resolveWindowsCommand(command: string): string | null {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+
+  // Check cache first
+  const cached = windowsCommandCache.get(command);
+  if (cached !== undefined) {
+    return cached || null;
+  }
+
+  try {
+    // Use 'where' command to find the executable in PATH
+    // 'where' is Windows equivalent of 'which'
+    const result = execSync(`where ${command}`, {
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+
+    // 'where' returns multiple lines if found in multiple locations, take first
+    const firstMatch = result.split(/\r?\n/)[0];
+    if (firstMatch && existsSync(firstMatch)) {
+      windowsCommandCache.set(command, firstMatch);
+      logger.debug(`Resolved ${command} to ${firstMatch}`);
+      return firstMatch;
+    }
+  } catch {
+    // Command not found in PATH
+    logger.debug(`Could not resolve ${command} via 'where' command`);
+  }
+
+  windowsCommandCache.set(command, '');
+  return null;
+}
 
 export interface RuntimeInfo {
   /** The runtime being used ('bundled' or 'system') */
@@ -74,9 +120,10 @@ export function detectRuntime(): RuntimeInfo {
         pythonPath = '/usr/local/bin/python3';
       }
     } else if (platform === 'win32') {
-      // Windows - use common install locations
-      nodePath = 'C:\\Program Files\\nodejs\\node.exe';
-      pythonPath = 'C:\\Python\\python.exe';
+      // Windows - use 'where' command to find actual installation paths
+      // This handles Scoop, Chocolatey, nvm-windows, manual installs, etc.
+      nodePath = resolveWindowsCommand('node.exe') || resolveWindowsCommand('node') || 'node';
+      pythonPath = resolveWindowsCommand('python.exe') || resolveWindowsCommand('python') || 'python';
     } else {
       // Linux - use system paths
       nodePath = '/usr/bin/node';
@@ -100,9 +147,96 @@ export function detectRuntime(): RuntimeInfo {
 /**
  * Get runtime to use for spawning .dxt extension processes.
  * Uses the same runtime that NCP itself is running with.
+ *
+ * On Windows, uses 'where' command to find actual executable paths,
+ * which handles all installation methods (Scoop, Chocolatey, nvm-windows, etc.)
  */
 export function getRuntimeForExtension(command: string): string {
   const runtime = detectRuntime();
+  const platform = process.platform;
+
+  // On Windows, try to resolve the command using 'where' first
+  // This provides a general solution for all commands
+  if (platform === 'win32') {
+    // For node-related commands, use our special handling
+    if (command === 'node' || command.endsWith('/node') || command.endsWith('\\node.exe')) {
+      return runtime.nodePath;
+    }
+
+    // For npx, find it relative to node or via 'where'
+    if (command === 'npx' || command.endsWith('/npx') || command.endsWith('\\npx.cmd')) {
+      // First, try to find npx.cmd next to node.exe (most reliable)
+      if (runtime.nodePath && runtime.nodePath !== 'node') {
+        const nodeDir = dirname(runtime.nodePath);
+        const npxPath = join(nodeDir, 'npx.cmd');
+        if (existsSync(npxPath)) {
+          logger.debug(`Found npx.cmd at ${npxPath}`);
+          return npxPath;
+        }
+      }
+      // Fallback: try 'where npx.cmd' or 'where npx'
+      const resolved = resolveWindowsCommand('npx.cmd') || resolveWindowsCommand('npx');
+      if (resolved) {
+        return resolved;
+      }
+      // Last resort: return bare command
+      return 'npx.cmd';
+    }
+
+    // For python, use detected path
+    if (command === 'python3' || command === 'python' ||
+        command.endsWith('/python3') || command.endsWith('/python') ||
+        command.endsWith('\\python.exe') || command.endsWith('\\python3.exe')) {
+      return runtime.pythonPath || command;
+    }
+
+    // For uvx, try to resolve via 'where'
+    if (command === 'uvx' || command.endsWith('/uvx') || command.endsWith('\\uvx.exe')) {
+      const resolved = resolveWindowsCommand('uvx.exe') || resolveWindowsCommand('uvx');
+      if (resolved) {
+        return resolved;
+      }
+      return 'uvx';
+    }
+
+    // For uv, try to resolve via 'where'
+    if (command === 'uv' || command.endsWith('/uv') || command.endsWith('\\uv.exe')) {
+      const resolved = resolveWindowsCommand('uv.exe') || resolveWindowsCommand('uv');
+      if (resolved) {
+        return resolved;
+      }
+      return 'uv';
+    }
+
+    // For wsl, it should be wsl.exe in System32
+    if (command === 'wsl' || command === 'wsl.exe') {
+      const resolved = resolveWindowsCommand('wsl.exe');
+      if (resolved) {
+        return resolved;
+      }
+      // Fallback to common location
+      return 'C:\\Windows\\System32\\wsl.exe';
+    }
+
+    // For any other command on Windows, try to resolve it
+    // Add .exe extension if not present and try to resolve
+    const commandsToTry = [command];
+    if (!command.endsWith('.exe') && !command.endsWith('.cmd') && !command.endsWith('.bat')) {
+      commandsToTry.push(`${command}.exe`, `${command}.cmd`);
+    }
+
+    for (const cmd of commandsToTry) {
+      const resolved = resolveWindowsCommand(cmd);
+      if (resolved) {
+        return resolved;
+      }
+    }
+
+    // Return original command as fallback
+    return command;
+  }
+
+  // Non-Windows platforms: original logic
 
   // If command is 'node' or ends with '/node', use detected Node runtime
   if (command === 'node' || command.endsWith('/node') || command.endsWith('\\node.exe')) {
@@ -120,8 +254,8 @@ export function getRuntimeForExtension(command: string): string {
     }
     // For system runtime, derive npx from node path
     // If node path is absolute (starts with /), derive npx from it
-    if (runtime.nodePath.startsWith('/') || runtime.nodePath.startsWith('C:')) {
-      const npxPath = runtime.nodePath.replace(/\/node$/, '/npx').replace(/\\node\.exe$/, '\\npx.cmd');
+    if (runtime.nodePath.startsWith('/')) {
+      const npxPath = runtime.nodePath.replace(/\/node$/, '/npx');
       return npxPath;
     }
     // Otherwise use system npx
@@ -137,20 +271,16 @@ export function getRuntimeForExtension(command: string): string {
 
   // Handle other common tools that may not be in PATH when running from .dxt
   // Only resolve if running as .dxt (when node path is absolute)
-  if (runtime.nodePath.startsWith('/') || runtime.nodePath.startsWith('C:')) {
+  if (runtime.nodePath.startsWith('/')) {
     // Handle uv (Python package manager)
-    if (command === 'uv' || command.endsWith('/uv') || command.endsWith('\\uv.exe')) {
+    if (command === 'uv' || command.endsWith('/uv')) {
       // Use platform-specific UV path (don't check existence due to sandbox)
-      const platform = process.platform;
       const arch = process.arch;
 
       if (platform === 'darwin') {
         // Try user install first, then homebrew
         const userUv = '/Users/' + userInfo().username + '/.local/bin/uv';
-        const homebrewUv = arch === 'arm64' ? '/opt/homebrew/bin/uv' : '/usr/local/bin/uv';
         return userUv;  // Prefer user install
-      } else if (platform === 'win32') {
-        return 'uv.exe';  // Windows
       } else {
         return '/usr/bin/uv';  // Linux
       }
