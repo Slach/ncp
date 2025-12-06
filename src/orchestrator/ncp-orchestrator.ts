@@ -1102,49 +1102,12 @@ export class NCPOrchestrator {
           !processEnv.PATH.includes('/opt/homebrew/bin') &&
           !processEnv.PATH.includes('/usr/local/bin');
       } else if (platform === 'win32') {
-        // Windows: Build dynamic paths based on user environment
-        // Don't hardcode paths - users may have Node/Python installed via Scoop, Chocolatey, nvm-windows, etc.
-        const userProfile = process.env.USERPROFILE || '';
-        const appData = process.env.APPDATA || '';
-        const localAppData = process.env.LOCALAPPDATA || '';
+        // Windows: Only ensure basic system paths exist
+        // User-specific paths (Scoop, npm, etc.) are already in process.env.PATH
+        // and findInPATH() in runtime-detector.ts handles command resolution
+        standardPaths = 'C:\\Windows\\System32;C:\\Windows';
 
-        // Build list of paths to include
-        const windowsPaths: string[] = [
-          'C:\\Windows\\System32',
-          'C:\\Windows',
-        ];
-
-        // Add npm global bin (for npm installed packages)
-        if (appData) {
-          windowsPaths.push(`${appData}\\npm`);
-        }
-
-        // Add common Scoop paths
-        if (userProfile) {
-          windowsPaths.push(`${userProfile}\\scoop\\shims`);
-          windowsPaths.push(`${userProfile}\\scoop\\apps\\nodejs-lts\\current`);
-          windowsPaths.push(`${userProfile}\\scoop\\apps\\nodejs\\current`);
-          windowsPaths.push(`${userProfile}\\scoop\\apps\\python\\current`);
-          windowsPaths.push(`${userProfile}\\scoop\\apps\\python\\current\\Scripts`);
-          // Add uv/uvx paths
-          windowsPaths.push(`${userProfile}\\.local\\bin`);
-        }
-
-        // Add local app data paths (for some installers)
-        if (localAppData) {
-          windowsPaths.push(`${localAppData}\\Programs\\Python\\Python312`);
-          windowsPaths.push(`${localAppData}\\Programs\\Python\\Python312\\Scripts`);
-          windowsPaths.push(`${localAppData}\\Programs\\Python\\Python311`);
-          windowsPaths.push(`${localAppData}\\Programs\\Python\\Python311\\Scripts`);
-        }
-
-        // Add common installation paths as fallback
-        windowsPaths.push('C:\\Program Files\\nodejs');
-        windowsPaths.push('C:\\Program Files (x86)\\nodejs');
-
-        standardPaths = windowsPaths.join(';');
-
-        // Check if System32 is missing (minimum required)
+        // Only augment if System32 is missing (very rare edge case)
         pathCheckNeeded = !!processEnv.PATH &&
           !processEnv.PATH.includes('C:\\Windows\\System32');
       } else {
