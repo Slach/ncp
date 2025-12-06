@@ -1105,11 +1105,13 @@ export class NCPOrchestrator {
         // Windows: Only ensure basic system paths exist
         // User-specific paths (Scoop, npm, etc.) are already in process.env.PATH
         // and findInPATH() in runtime-detector.ts handles command resolution
-        standardPaths = 'C:\\Windows\\System32;C:\\Windows';
+        const windir = process.env.WINDIR || process.env.windir || 'C:\\Windows';
+        standardPaths = `${windir}\\System32;${windir}`;
 
         // Only augment if System32 is missing (very rare edge case)
+        // Use case-insensitive check since Windows paths are case-insensitive
         pathCheckNeeded = !!processEnv.PATH &&
-          !processEnv.PATH.includes('C:\\Windows\\System32');
+          !processEnv.PATH.toLowerCase().includes('system32');
       } else {
         // Linux: Standard system paths
         standardPaths = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
