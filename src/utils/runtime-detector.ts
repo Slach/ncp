@@ -250,12 +250,31 @@ export function getRuntimeForExtension(command: string): string {
     return runtime.pythonPath || command;
   }
 
-  // Handle uv when running as .dxt (node path is absolute)
-  if (runtime.nodePath.startsWith('/') && baseCommand === 'uv') {
+  // Handle uv/uvx when running as .dxt (node path is absolute)
+  if (runtime.nodePath.startsWith('/') && (baseCommand === 'uv' || baseCommand === 'uvx')) {
     if (platform === 'darwin') {
-      return '/Users/' + userInfo().username + '/.local/bin/uv';
+      const arch = process.arch;
+      // Try user install first
+      const userPath = '/Users/' + userInfo().username + '/.local/bin/' + baseCommand;
+      if (existsSync(userPath)) {
+        return userPath;
+      }
+      // Then try Homebrew paths based on architecture
+      const homebrewPath = arch === 'arm64'
+        ? '/opt/homebrew/bin/' + baseCommand
+        : '/usr/local/bin/' + baseCommand;
+      if (existsSync(homebrewPath)) {
+        return homebrewPath;
+      }
+      // Fallback to user path (let it fail with clear error if not found)
+      return userPath;
     } else {
-      return '/usr/bin/uv';
+      // Linux
+      const userPath = '/home/' + userInfo().username + '/.local/bin/' + baseCommand;
+      if (existsSync(userPath)) {
+        return userPath;
+      }
+      return '/usr/bin/' + baseCommand;
     }
   }
 
